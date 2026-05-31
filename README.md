@@ -86,10 +86,7 @@ cargo install --path .
    Compiling scraper v0.19.1
    Compiling tvorenia_scraper v0.1.0 
     Finished `release` profile [optimized] target(s) in 38.24s
-   Replacing /home/koziner/.cargo/bin/derazryadka
-   Replacing /home/koziner/.cargo/bin/orthodedup
-   Replacing /home/koziner/.cargo/bin/tvorenia_scraper
-
+ 
 ldd  tvorenia_scraper.avx128-amd64.linux.bin                                
         linux-vdso.so.1 (0x00007ffd80ff7000)
         libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f9fb880c000)
