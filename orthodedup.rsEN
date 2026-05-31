@@ -1,0 +1,367 @@
+use anyhow::{Context, Result};
+use clap::{Parser, ValueEnum};
+use std::collections::HashMap;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
+enum Mode {
+    /// If files are passed, deduplicate files; otherwise deduplicate stdin lines.
+    Auto,
+    /// Deduplicate stdin/files as individual lines, like huniq but orthography-aware.
+    Lines,
+    /// Deduplicate whole Markdown/text files by normalized body text.
+    Files,
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about = "Orthography-aware deduplicator: old Russian vs modern spelling")]
+struct Args {
+    /// Operation mode. Auto = files if file arguments or --file-list0 are present, otherwise lines.
+    #[arg(long, value_enum, default_value_t = Mode::Auto)]
+    mode: Mode,
+
+    /// Read NUL-separated file paths from stdin. Useful with: find ... -print0 | orthodedup --file-list0
+    #[arg(long)]
+    file_list0: bool,
+
+    /// Write duplicate pairs/groups as TSV. For files: duplicate<TAB>keeper<TAB>duplicate_score<TAB>keeper_score.
+    #[arg(long)]
+    pairs: Option<PathBuf>,
+
+    /// Write keeper paths/lines to this file. In lines mode, writes kept lines. In files mode, writes keeper paths.
+    #[arg(long)]
+    keepers: Option<PathBuf>,
+
+    /// Copy kept files to this directory. Files mode only.
+    #[arg(long)]
+    copy_kept: Option<PathBuf>,
+
+    /// In files mode, print only keeper paths to stdout instead of verbose summary.
+    #[arg(long)]
+    print0: bool,
+
+    /// Files for file mode, or files whose lines are read in line mode.
+    files: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct FileRec {
+    path: PathBuf,
+    old_score: usize,
+    byte_len: usize,
+}
+
+#[derive(Clone, Debug)]
+struct LineGroup {
+    line: String,
+    old_score: usize,
+    order: usize,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let mode = match args.mode {
+        Mode::Auto if args.file_list0 || !args.files.is_empty() => Mode::Files,
+        Mode::Auto => Mode::Lines,
+        other => other,
+    };
+
+    match mode {
+        Mode::Lines => run_lines(&args),
+        Mode::Files => run_files(&args),
+        Mode::Auto => unreachable!(),
+    }
+}
+
+fn run_lines(args: &Args) -> Result<()> {
+    let input = if args.files.is_empty() {
+        let mut s = String::new();
+        io::stdin().read_to_string(&mut s)?;
+        s
+    } else {
+        let mut s = String::new();
+        for path in &args.files {
+            s.push_str(&fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?);
+            if !s.ends_with('\n') {
+                s.push('\n');
+            }
+        }
+        s
+    };
+
+    let mut order_keys: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, LineGroup> = HashMap::new();
+    let mut pairs: Vec<(String, String, usize, usize)> = Vec::new();
+
+    for (idx, line) in input.lines().enumerate() {
+        let key = normalize_key(line);
+        if key.is_empty() {
+            continue;
+        }
+        let score = old_orthography_score(line);
+        if let Some(g) = groups.get_mut(&key) {
+            if is_better(score, line.len(), g.old_score, g.line.len()) {
+                pairs.push((g.line.clone(), line.to_string(), g.old_score, score));
+                g.line = line.to_string();
+                g.old_score = score;
+            } else {
+                pairs.push((line.to_string(), g.line.clone(), score, g.old_score));
+            }
+        } else {
+            order_keys.push(key.clone());
+            groups.insert(
+                key,
+                LineGroup {
+                    line: line.to_string(),
+                    old_score: score,
+                    order: idx,
+                },
+            );
+        }
+    }
+
+    order_keys.sort_by_key(|k| groups.get(k).map(|g| g.order).unwrap_or(usize::MAX));
+
+    let mut output = String::new();
+    for key in &order_keys {
+        if let Some(g) = groups.get(key) {
+            output.push_str(&g.line);
+            output.push('\n');
+        }
+    }
+
+    if let Some(path) = &args.keepers {
+        fs::write(path, &output).with_context(|| format!("writing {}", path.display()))?;
+    } else {
+        print!("{output}");
+    }
+
+    if let Some(path) = &args.pairs {
+        let mut tsv = String::new();
+        for (dup, keep, dup_score, keep_score) in pairs {
+            tsv.push_str(&escape_tsv(&dup));
+            tsv.push('\t');
+            tsv.push_str(&escape_tsv(&keep));
+            tsv.push('\t');
+            tsv.push_str(&dup_score.to_string());
+            tsv.push('\t');
+            tsv.push_str(&keep_score.to_string());
+            tsv.push('\n');
+        }
+        fs::write(path, tsv).with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    Ok(())
+}
+
+fn run_files(args: &Args) -> Result<()> {
+    let mut files = args.files.clone();
+    if args.file_list0 {
+        let mut buf = Vec::new();
+        io::stdin().read_to_end(&mut buf)?;
+        for part in buf.split(|b| *b == 0) {
+            if !part.is_empty() {
+                files.push(PathBuf::from(String::from_utf8_lossy(part).to_string()));
+            }
+        }
+    }
+
+    let mut order_keys: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<FileRec>> = HashMap::new();
+
+    for path in files {
+        let text = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let body = markdown_body_for_dedup(&text);
+        let key = normalize_key(body);
+        if key.is_empty() {
+            continue;
+        }
+        let rec = FileRec {
+            path: path.clone(),
+            old_score: old_orthography_score(body),
+            byte_len: body.len(),
+        };
+        if !groups.contains_key(&key) {
+            order_keys.push(key.clone());
+        }
+        groups.entry(key).or_default().push(rec);
+    }
+
+    let mut keepers: Vec<FileRec> = Vec::new();
+    let mut pairs_tsv = String::new();
+
+    for key in order_keys {
+        let mut recs = groups.remove(&key).unwrap_or_default();
+        if recs.is_empty() {
+            continue;
+        }
+        recs.sort_by(|a, b| {
+            b.old_score
+                .cmp(&a.old_score)
+                .then_with(|| b.byte_len.cmp(&a.byte_len))
+                .then_with(|| a.path.cmp(&b.path))
+        });
+        let keeper = recs[0].clone();
+        for dup in recs.iter().skip(1) {
+            pairs_tsv.push_str(&dup.path.display().to_string());
+            pairs_tsv.push('\t');
+            pairs_tsv.push_str(&keeper.path.display().to_string());
+            pairs_tsv.push('\t');
+            pairs_tsv.push_str(&dup.old_score.to_string());
+            pairs_tsv.push('\t');
+            pairs_tsv.push_str(&keeper.old_score.to_string());
+            pairs_tsv.push('\n');
+        }
+        keepers.push(keeper);
+    }
+
+    if let Some(path) = &args.pairs {
+        fs::write(path, pairs_tsv).with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    if let Some(dir) = &args.copy_kept {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        for rec in &keepers {
+            let name = rec.path.file_name().unwrap_or_default();
+            fs::copy(&rec.path, dir.join(name))
+                .with_context(|| format!("copying {}", rec.path.display()))?;
+        }
+    }
+
+    let mut keeper_list = Vec::new();
+    for rec in &keepers {
+        if args.print0 {
+            keeper_list.extend_from_slice(rec.path.display().to_string().as_bytes());
+            keeper_list.push(0);
+        } else {
+            keeper_list.extend_from_slice(rec.path.display().to_string().as_bytes());
+            keeper_list.push(b'\n');
+        }
+    }
+
+    if let Some(path) = &args.keepers {
+        fs::write(path, &keeper_list).with_context(|| format!("writing {}", path.display()))?;
+    } else if args.print0 {
+        io::stdout().write_all(&keeper_list)?;
+    } else {
+        eprintln!(
+            "orthodedup: kept {} groups/files; duplicate pairs written: {}",
+            keepers.len(),
+            args.pairs.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<not requested>".to_string())
+        );
+        io::stdout().write_all(&keeper_list)?;
+    }
+
+    Ok(())
+}
+
+fn markdown_body_for_dedup(text: &str) -> &str {
+    // Ignore scraper header (title/source) because duplicate texts may come from different URLs.
+    text.split_once("\n---\n").map(|(_, body)| body).unwrap_or(text)
+}
+
+fn is_better(new_score: usize, new_len: usize, old_score: usize, old_len: usize) -> bool {
+    new_score > old_score || (new_score == old_score && new_len > old_len)
+}
+
+fn old_orthography_score(s: &str) -> usize {
+    let mut score = 0usize;
+    for ch in s.chars() {
+        if matches!(ch, 'ѣ' | 'Ѣ' | 'і' | 'І' | 'ѳ' | 'Ѳ' | 'ѵ' | 'Ѵ') {
+            score += 4;
+        }
+    }
+    for word in s.split(|c: char| !c.is_alphabetic()) {
+        if word.ends_with('ъ') || word.ends_with('Ъ') {
+            score += 1;
+        }
+    }
+    score
+}
+
+fn normalize_key(s: &str) -> String {
+    let mut raw = String::with_capacity(s.len());
+
+    for ch in s.chars() {
+        if is_combining_mark(ch) {
+            continue;
+        }
+        for lower in ch.to_lowercase() {
+            let mapped = match lower {
+                'ѣ' => 'е',
+                'і' => 'и',
+                'ѳ' => 'ф',
+                'ѵ' => 'и',
+                'ё' => 'е',
+                c => c,
+            };
+            if mapped.is_alphanumeric() {
+                raw.push(mapped);
+            } else {
+                raw.push(' ');
+            }
+        }
+    }
+
+    let mut words: Vec<String> = Vec::new();
+    for w in raw.split_whitespace() {
+        let w = modernize_word(w);
+        if !w.is_empty() {
+            words.push(w);
+        }
+    }
+    words.join(" ")
+}
+
+fn modernize_word(word: &str) -> String {
+    let mut w = word.trim_end_matches('ъ').to_string();
+
+    match w.as_str() {
+        "ея" => return "ее".to_string(),
+        "он" => return w,
+        _ => {}
+    }
+
+    if w.ends_with("аго") && w.len() > "аго".len() {
+        let cut = w.len() - "аго".len();
+        w.replace_range(cut.., "ого");
+    } else if w.ends_with("яго") && w.len() > "яго".len() {
+        let cut = w.len() - "яго".len();
+        w.replace_range(cut.., "его");
+    }
+
+    if w.ends_with("ыя") && w.len() > "ыя".len() {
+        let cut = w.len() - "ыя".len();
+        w.replace_range(cut.., "ые");
+    }
+
+    w
+}
+
+fn is_combining_mark(c: char) -> bool {
+    matches!(
+        c as u32,
+        0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F
+    )
+}
+
+fn escape_tsv(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_key;
+
+    #[test]
+    fn old_and_modern_match() {
+        assert_eq!(normalize_key("въ вѣрѣ пришелъ"), normalize_key("в вере пришел"));
+        assert_eq!(normalize_key("духовнаго дѣла"), normalize_key("духовного дела"));
+        assert_eq!(normalize_key("мудрыя змѣи"), normalize_key("мудрые змеи"));
+    }
+}

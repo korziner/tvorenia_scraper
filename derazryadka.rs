@@ -1,0 +1,188 @@
+use anyhow::{Context, Result};
+use clap::Parser;
+use std::fs;
+use std::io::{self, Read, Write};
+use std::path::PathBuf;
+
+#[derive(Parser, Debug)]
+#[command(
+    version,
+    about = "Распознавать и исправлять русскую разрядку / текстъ съ разставленными буквами",
+    help_template = "{before-help}{name} {version}\n{about}\n\nУпотребленіе:\n  {usage}\n\nПараметры и доводы:\n{all-args}{after-help}"
+)]
+struct Args {
+    /// Переписывать файлы на мѣстѣ. Безъ сего исправленный текстъ печатается въ stdout.
+    #[arg(short = 'i', long)]
+    in_place: bool,
+
+    /// Только сообщать о файлахъ/строкахъ съ разрядкой, не выводя исправленнаго текста.
+    #[arg(long)]
+    detect_only: bool,
+
+    /// Файлы для обработки. Если списокъ пустъ, обрабатывается stdin.
+    files: Vec<PathBuf>,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+
+    if args.files.is_empty() {
+        let mut input = String::new();
+        io::stdin().read_to_string(&mut input)?;
+        let fixed = derazryadka_text(&input);
+        if args.detect_only {
+            if fixed != input {
+                println!("stdin: razryadka detected");
+            }
+        } else {
+            print!("{fixed}");
+        }
+        return Ok(());
+    }
+
+    for path in &args.files {
+        let input = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let fixed = derazryadka_text(&input);
+        let changed = fixed != input;
+
+        if args.detect_only {
+            if changed {
+                println!("{}: razryadka detected", path.display());
+            }
+            continue;
+        }
+
+        if args.in_place {
+            if changed {
+                let tmp = path.with_extension(format!(
+                    "{}.tmp",
+                    path.extension().and_then(|s| s.to_str()).unwrap_or("txt")
+                ));
+                fs::write(&tmp, fixed).with_context(|| format!("writing {}", tmp.display()))?;
+                fs::rename(&tmp, path).with_context(|| format!("renaming {}", path.display()))?;
+                eprintln!("fixed {}", path.display());
+            }
+        } else {
+            io::stdout().write_all(fixed.as_bytes())?;
+        }
+    }
+
+    Ok(())
+}
+
+fn derazryadka_text(input: &str) -> String {
+    let chars: Vec<char> = input.chars().collect();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0usize;
+
+    while i < chars.len() {
+        if let Some(parsed) = parse_razryadka_phrase(&chars, i) {
+            out.push_str(&parsed.text);
+            i = parsed.end;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+struct RazryadkaParsed {
+    text: String,
+    end: usize,
+}
+
+fn parse_razryadka_phrase(chars: &[char], start: usize) -> Option<RazryadkaParsed> {
+    let (first, mut i) = read_letter_cluster(chars, start)?;
+    let mut words: Vec<String> = Vec::new();
+    let mut current = first;
+    let mut single_sep_count = 0usize;
+    let mut word_break_count = 0usize;
+    let mut total_letters = 1usize;
+    let mut max_word_letters = 1usize;
+    let mut current_word_letters = 1usize;
+
+    loop {
+        let sep_start = i;
+        while i < chars.len() && is_razryadka_space(chars[i]) {
+            i += 1;
+        }
+        let sep_len = i - sep_start;
+        if sep_len == 0 {
+            break;
+        }
+
+        let Some((next, next_i)) = read_letter_cluster(chars, i) else {
+            i = sep_start;
+            break;
+        };
+
+        if sep_len == 1 {
+            current.push_str(&next);
+            current_word_letters += 1;
+            total_letters += 1;
+            single_sep_count += 1;
+            max_word_letters = max_word_letters.max(current_word_letters);
+        } else {
+            words.push(current);
+            current = next;
+            current_word_letters = 1;
+            total_letters += 1;
+            word_break_count += 1;
+        }
+        i = next_i;
+    }
+
+    max_word_letters = max_word_letters.max(current_word_letters);
+    words.push(current);
+
+    if single_sep_count < 2 {
+        return None;
+    }
+    if max_word_letters < 3 && !(word_break_count > 0 && total_letters >= 5) {
+        return None;
+    }
+
+    Some(RazryadkaParsed {
+        text: words.join(" "),
+        end: i,
+    })
+}
+
+fn read_letter_cluster(chars: &[char], start: usize) -> Option<(String, usize)> {
+    let first = *chars.get(start)?;
+    if !first.is_alphabetic() {
+        return None;
+    }
+    let mut s = String::new();
+    s.push(first);
+    let mut i = start + 1;
+    while i < chars.len() && is_combining_mark(chars[i]) {
+        s.push(chars[i]);
+        i += 1;
+    }
+    Some((s, i))
+}
+
+fn is_combining_mark(c: char) -> bool {
+    matches!(c as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
+}
+
+fn is_razryadka_space(c: char) -> bool {
+    c == ' ' || c == '\t' || c == '\u{00A0}' || c == '\u{202F}'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::derazryadka_text;
+
+    #[test]
+    fn fixes_nbsp_razryadka() {
+        assert_eq!(derazryadka_text("п\u{00A0}р\u{00A0}и\u{00A0}ш\u{00A0}е\u{00A0}л\u{00A0}ъ\u{00A0} \u{00A0}к\u{00A0}ъ"), "пришелъ къ");
+    }
+
+    #[test]
+    fn keeps_normal_text() {
+        assert_eq!(derazryadka_text("И русскій пророкъ"), "И русскій пророкъ");
+    }
+}
