@@ -1,5 +1,4 @@
 # tvorenia_scraper
-# tvorenia_scraper
 
 Rust-сниматель страницъ для `http://tvorenia.russportal.ru/` съ сохраненіемъ состоянія и возможностью продолжать скачиваніе.
 
