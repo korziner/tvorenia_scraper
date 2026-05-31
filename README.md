@@ -36,7 +36,11 @@ ls -gh `which tvorenia_scraper`
 ~/deb/tvorenia_scraper $ gcc --version
 clang version 21.1.8
 Target: aarch64-unknown-linux-android24
-Thread model: posix    
+Thread model: posix 
+
+apt upgrade rust
+..
+rust is already the newest version (1.94.1)
 ```
 ## Сборка амд64
 ```
