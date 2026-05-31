@@ -10,11 +10,96 @@ Rust-сниматель страницъ для `http://tvorenia.russportal.ru/`
 - `state.json` — состояніе обхода: очередь, видѣнные URL, скачанныя страницы, ошибки;
 - `manifest.jsonl` — по одной JSON-записи на всякую сохраненную страницу.
 
-## Сборка
+## Сборка termux
 
 ```bash
-cargo build --release
+CFLAGS=" -O3 -Wtarget-cpu=cortex-a76 -Wtarget-feature=+neon" cargo install --path .
+  Installing tvorenia_scraper v0.1.0 (/data/data/com.termux/files/home/deb/tvorenia_scraper)
+    Updating crates.io index
+     Locking 202 packages to latest Rust 1.94.1 compatible versions
+      Adding reqwest v0.12.28 (available: v0.13.4)
+   Compiling tvorenia_scraper v0.1.0 (/data/data/com.termux/files/home/deb/tvorenia_scraper)
+    Finished `release` profile [optimized] target(s) in 23.03s
+   Replacing /data/data/com.termux/files/home/.cargo/bin/derazryadka
+   Replacing /data/data/com.termux/files/home/.cargo/bin/orthodedup
+   Replacing /data/data/com.termux/files/home/.cargo/bin/tvorenia_scraper
+    Replaced package `tvorenia_scraper v0.1.0 (/data/data/com.termux/files/home/deb/tvorenia_scraper)` with `tvorenia_scraper v0.1.0 (/data/data/com.termux/files/home/deb/tvorenia_scraper)` (executables `derazryadka`, `orthodedup`, `tvorenia_scraper`)
+
+ls -gh `which tvorenia_scraper`  
+ 9.7M  /data/data/com.termux/files/home/.cargo/bin/tvorenia_scraper
+~/deb/tvorenia_scraper $ ldd  `which tvorenia_scraper`  
+        libdl.so => /system/lib64/libdl.so
+        libm.so => /system/lib64/libm.so
+        libc.so => /system/lib64/libc.so
+        ld-android.so => /system/lib64/ld-android.so
+        
+~/deb/tvorenia_scraper $ gcc --version
+clang version 21.1.8
+Target: aarch64-unknown-linux-android24
+Thread model: posix    
 ```
+## Сборка амд64
+```
+cargo install --path .
+
+  Installing tvorenia_scraper v0.1.0 
+    Updating crates.io index
+     Locking 211 packages to latest compatible versions
+      Adding reqwest v0.12.28 (available: v0.13.4)
+      Adding scraper v0.19.1 (available: v0.27.0)
+   Compiling zerocopy v0.8.50
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling phf_shared v0.11.3
+   Compiling siphasher v0.3.11
+   Compiling mac v0.1.1
+   Compiling futf v0.1.5
+   Compiling phf_shared v0.10.0
+   Compiling getrandom v0.3.4
+   Compiling version_check v0.9.5
+   Compiling ahash v0.8.12
+   Compiling tendril v0.4.3
+   Compiling string_cache v0.8.9
+   Compiling cssparser-macros v0.6.1
+   Compiling getrandom v0.2.17
+   Compiling html5ever v0.27.0
+   Compiling rand_core v0.6.4
+   Compiling byteorder v1.5.0
+   Compiling phf v0.10.1
+   Compiling fxhash v0.2.1
+   Compiling servo_arc v0.3.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling derive_more v0.99.20
+   Compiling ego-tree v0.6.3
+   Compiling rand_chacha v0.3.1
+   Compiling rand v0.8.6
+   Compiling phf_generator v0.11.3
+   Compiling phf_generator v0.10.0
+   Compiling phf_codegen v0.10.0
+   Compiling string_cache_codegen v0.5.4
+   Compiling phf_codegen v0.11.3
+   Compiling phf_macros v0.11.3
+   Compiling selectors v0.25.0
+   Compiling markup5ever v0.12.1
+   Compiling phf v0.11.3
+   Compiling cssparser v0.31.2
+   Compiling scraper v0.19.1
+   Compiling tvorenia_scraper v0.1.0 
+    Finished `release` profile [optimized] target(s) in 38.24s
+   Replacing /home/koziner/.cargo/bin/derazryadka
+   Replacing /home/koziner/.cargo/bin/orthodedup
+   Replacing /home/koziner/.cargo/bin/tvorenia_scraper
+
+ldd  tvorenia_scraper.avx128-amd64.linux.bin                                
+        linux-vdso.so.1 (0x00007ffd80ff7000)
+        libgcc_s.so.1 => /lib/x86_64-linux-gnu/libgcc_s.so.1 (0x00007f9fb880c000)
+        libpthread.so.0 => /lib/x86_64-linux-gnu/libpthread.so.0 (0x00007f9fb87e9000)
+        libm.so.6 => /lib/x86_64-linux-gnu/libm.so.6 (0x00007f9fb869a000)
+        libdl.so.2 => /lib/x86_64-linux-gnu/libdl.so.2 (0x00007f9fb8694000)
+        libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007f9fb84a2000)
+        /lib64/ld-linux-x86-64.so.2 (0x00007f9fb8fd8000)
+```
+
 
 ## Запускъ / продолженіе
 
